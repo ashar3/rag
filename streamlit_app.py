@@ -12,6 +12,8 @@ On Streamlit Cloud:
 import os
 import tempfile
 import streamlit as st
+import streamlit.components.v1 as components
+from pyvis.network import Network
 
 # Tell ChromaDB to run in-memory — no disk needed on Streamlit Cloud
 os.environ["CHROMA_MODE"] = "memory"
@@ -286,6 +288,129 @@ the answer is *grounded* in your actual document.
         st.success("✅ Answer generated from the merged context above")
 
 
+# ── GRAPH VISUALISER ──────────────────────────────────────────────────────────
+
+# Color per entity type — makes it easy to spot skills vs companies vs dates
+NODE_COLORS = {
+    "SKILL":     "#4f9de8",   # blue
+    "COMPANY":   "#f4913a",   # orange
+    "PERSON":    "#2ecc71",   # green
+    "ROLE":      "#9b59b6",   # purple
+    "EDUCATION": "#f1c40f",   # yellow
+    "DATE":      "#95a5a6",   # grey
+    "PROJECT":   "#e74c3c",   # red
+    "TOOL":      "#1abc9c",   # teal
+}
+DEFAULT_COLOR = "#bdc3c7"
+
+EDGE_COLORS = {
+    "USED_AT":      "#4f9de8",
+    "WORKED_AT":    "#f4913a",
+    "HAS_SKILL":    "#2ecc71",
+    "STUDIED_AT":   "#f1c40f",
+    "BUILT":        "#e74c3c",
+    "DURING":       "#95a5a6",
+    "LED":          "#9b59b6",
+    "PART_OF":      "#1abc9c",
+}
+DEFAULT_EDGE_COLOR = "#7f8c8d"
+
+
+def render_graph(G):
+    """
+    Builds an interactive pyvis graph from a NetworkX DiGraph and renders it
+    inside Streamlit via an HTML component.
+
+    Node size   = number of connections (more connected = bigger = more important)
+    Node color  = entity type (blue=skill, orange=company, green=person, ...)
+    Edge color  = relationship type
+    Edge label  = relationship name (USED_AT, WORKED_AT, etc.)
+    """
+    if G is None or G.number_of_nodes() == 0:
+        st.warning("No graph built yet — ingest a PDF first.")
+        return
+
+    net = Network(
+        height="620px",
+        width="100%",
+        bgcolor="#0e1117",      # dark background matches Streamlit dark mode
+        font_color="#ffffff",
+        directed=True,
+    )
+
+    # Physics settings — spring layout spreads nodes naturally
+    net.set_options("""
+    {
+      "physics": {
+        "forceAtlas2Based": {
+          "gravitationalConstant": -60,
+          "centralGravity": 0.01,
+          "springLength": 120,
+          "springConstant": 0.08
+        },
+        "solver": "forceAtlas2Based",
+        "stabilization": { "iterations": 150 }
+      },
+      "edges": {
+        "smooth": { "type": "dynamic" },
+        "arrows": { "to": { "enabled": true, "scaleFactor": 0.6 } }
+      },
+      "interaction": {
+        "hover": true,
+        "tooltipDelay": 100,
+        "navigationButtons": true,
+        "keyboard": true
+      }
+    }
+    """)
+
+    # Add nodes
+    for node, attrs in G.nodes(data=True):
+        node_type = attrs.get("type", "UNKNOWN")
+        color     = NODE_COLORS.get(node_type, DEFAULT_COLOR)
+        degree    = G.degree(node)
+        size      = max(15, min(50, 15 + degree * 5))  # size 15–50 based on connections
+
+        net.add_node(
+            node,
+            label=node,
+            color=color,
+            size=size,
+            title=f"<b>{node}</b><br>Type: {node_type}<br>Connections: {degree}",
+            font={"size": 13, "color": "#ffffff"},
+        )
+
+    # Add edges
+    for src, dst, attrs in G.edges(data=True):
+        relation  = attrs.get("relation", "RELATED_TO")
+        color     = EDGE_COLORS.get(relation, DEFAULT_EDGE_COLOR)
+        net.add_edge(
+            src, dst,
+            label=relation,
+            color=color,
+            title=f"{src} → {relation} → {dst}",
+            font={"size": 10, "color": "#cccccc", "align": "middle"},
+            width=2,
+        )
+
+    # Save to temp file and embed as HTML component
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w") as f:
+        net.save_graph(f.name)
+        html = open(f.name).read()
+
+    components.html(html, height=640, scrolling=False)
+
+    # Legend
+    st.markdown("**Node color legend:**")
+    cols = st.columns(len(NODE_COLORS))
+    for col, (ntype, color) in zip(cols, NODE_COLORS.items()):
+        col.markdown(
+            f"<span style='background:{color};padding:3px 8px;border-radius:4px;"
+            f"color:#fff;font-size:12px'>{ntype}</span>",
+            unsafe_allow_html=True,
+        )
+
+
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -328,66 +453,132 @@ with st.sidebar:
         st.rerun()
 
 
-# ── CHAT ───────────────────────────────────────────────────────────────────────
+# ── TABS ───────────────────────────────────────────────────────────────────────
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg["role"] == "assistant" and msg.get("detective_report"):
-            show_detective_report(msg["detective_report"])
+tab_chat, tab_graph = st.tabs(["💬 Chat", "🕸️ Knowledge Graph"])
 
-if question := st.chat_input("Ask about the resume..."):
-    if not st.session_state.chunks:
-        st.warning("Please upload and ingest a PDF first.")
-        st.stop()
 
-    st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(question)
+# ── TAB 1: CHAT ────────────────────────────────────────────────────────────────
 
-    with st.chat_message("assistant"):
-        with st.spinner("3 detectives working..."):
-            try:
-                retrieval_result = retrieve(
-                    query=question,
-                    graph=st.session_state.graph,
-                    all_chunks=st.session_state.chunks,
-                    bm25_index=st.session_state.bm25_index,
-                )
-                merged_chunks = retrieval_result["merged"]
+with tab_chat:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant" and msg.get("detective_report"):
+                show_detective_report(msg["detective_report"])
 
-                messages = build_prompt(
-                    query=question,
-                    retrieved_chunks=merged_chunks,
-                    chat_history=st.session_state.history.get(),
-                )
-                answer = generate_answer(messages)
+    if question := st.chat_input("Ask about the resume..."):
+        if not st.session_state.chunks:
+            st.warning("Please upload and ingest a PDF first.")
+            st.stop()
 
-                st.session_state.history.add("user", question)
-                st.session_state.history.add("assistant", answer)
+        st.session_state.messages.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
 
-                def fmt(hits):
-                    return [{"text": h["text"][:150], "source": h.get("retrieval_source","?"),
-                             "score": h.get("bm25_score") or h.get("distance") or h.get("rrf_score")}
-                            for h in hits]
+        with st.chat_message("assistant"):
+            with st.spinner("3 detectives working..."):
+                try:
+                    retrieval_result = retrieve(
+                        query=question,
+                        graph=st.session_state.graph,
+                        all_chunks=st.session_state.chunks,
+                        bm25_index=st.session_state.bm25_index,
+                    )
+                    merged_chunks = retrieval_result["merged"]
 
-                detective_report = {
-                    "query":          question,
-                    "query_tokens":   question.lower().split(),
-                    "vector":         fmt(retrieval_result["detective_a_vector"]),
-                    "bm25":           fmt(retrieval_result["detective_b_bm25"]),
-                    "graph":          fmt(retrieval_result["detective_c_graph"]),
-                    "query_entities": retrieval_result["query_entities"],
-                }
+                    messages = build_prompt(
+                        query=question,
+                        retrieved_chunks=merged_chunks,
+                        chat_history=st.session_state.history.get(),
+                    )
+                    answer = generate_answer(messages)
 
-                st.markdown(answer)
-                show_detective_report(detective_report)
+                    st.session_state.history.add("user", question)
+                    st.session_state.history.add("assistant", answer)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "detective_report": detective_report,
-                })
+                    def fmt(hits):
+                        return [{"text": h["text"][:150], "source": h.get("retrieval_source","?"),
+                                 "score": h.get("bm25_score") or h.get("distance") or h.get("rrf_score")}
+                                for h in hits]
 
-            except Exception as e:
-                st.error(f"Chat failed: {type(e).__name__}: {e}")
+                    detective_report = {
+                        "query":          question,
+                        "query_tokens":   question.lower().split(),
+                        "vector":         fmt(retrieval_result["detective_a_vector"]),
+                        "bm25":           fmt(retrieval_result["detective_b_bm25"]),
+                        "graph":          fmt(retrieval_result["detective_c_graph"]),
+                        "query_entities": retrieval_result["query_entities"],
+                    }
+
+                    st.markdown(answer)
+                    show_detective_report(detective_report)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer,
+                        "detective_report": detective_report,
+                    })
+
+                except Exception as e:
+                    st.error(f"Chat failed: {type(e).__name__}: {e}")
+
+
+# ── TAB 2: KNOWLEDGE GRAPH ─────────────────────────────────────────────────────
+
+with tab_graph:
+    st.markdown("### 🕸️ Knowledge Graph — Your Resume as a Web of Relationships")
+    st.markdown("""
+Every **dot** = an entity extracted from your resume (skill, company, person, date, project).
+Every **line** = a relationship between two entities.
+
+**How to read it:**
+- **Bigger dot** = more connections = more important node
+- **Color** = type of entity (see legend below)
+- **Hover** over any dot or line to see details
+- **Drag** nodes to rearrange
+- **Scroll** to zoom in/out
+- **Click** a node to highlight its direct connections
+""")
+
+    if st.session_state.graph is None:
+        st.info("⬅️ Upload and ingest a PDF first to see its knowledge graph here.")
+    else:
+        G = st.session_state.graph
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total nodes", G.number_of_nodes())
+        col2.metric("Total edges", G.number_of_edges())
+        col3.metric("Avg connections", round(
+            sum(d for _, d in G.degree()) / max(G.number_of_nodes(), 1), 1
+        ))
+
+        st.markdown("---")
+
+        # Option to filter by entity type
+        all_types = list({G.nodes[n].get("type", "UNKNOWN") for n in G.nodes()})
+        selected_types = st.multiselect(
+            "Filter by entity type (empty = show all)",
+            options=sorted(all_types),
+            default=[],
+        )
+
+        # Build subgraph if filtered
+        if selected_types:
+            nodes_to_show = [n for n in G.nodes() if G.nodes[n].get("type") in selected_types]
+            subG = G.subgraph(nodes_to_show)
+            st.caption(f"Showing {subG.number_of_nodes()} nodes / {subG.number_of_edges()} edges (filtered)")
+        else:
+            subG = G
+            st.caption(f"Showing all {G.number_of_nodes()} nodes / {G.number_of_edges()} edges")
+
+        render_graph(subG)
+
+        # Most connected nodes table
+        st.markdown("### 🏆 Most Connected Nodes")
+        st.caption("Nodes with the most connections are the 'hubs' of your resume — the central concepts.")
+        top_nodes = sorted(G.degree(), key=lambda x: x[1], reverse=True)[:10]
+        st.table({
+            "Entity":      [n for n, _ in top_nodes],
+            "Type":        [G.nodes[n].get("type", "?") for n, _ in top_nodes],
+            "Connections": [d for _, d in top_nodes],
+        })
