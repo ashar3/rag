@@ -8,3 +8,4 @@ chroma_db/
 *.egg-info/
 .venv/
 venv/
+.streamlit/secrets.toml

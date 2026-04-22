@@ -18,9 +18,13 @@ from pyvis.network import Network
 # Tell ChromaDB to run in-memory — no disk needed on Streamlit Cloud
 os.environ["CHROMA_MODE"] = "memory"
 
-# Pull OpenAI key from Streamlit Secrets if available
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+# Pull OpenAI key from Streamlit Secrets if available (Cloud)
+# Falls back to .env file when running locally
+try:
+    if "OPENAI_API_KEY" in st.secrets:
+        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+except FileNotFoundError:
+    pass  # no secrets.toml locally — .env is loaded below by dotenv
 
 # ── Pipeline imports (called directly, no HTTP) ────────────────────────────────
 from ingestion.pdf_parser import parse_pdf
