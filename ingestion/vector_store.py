@@ -85,4 +85,7 @@ def query_similar(query_embedding: list[float], top_k: int = 5) -> list[dict]:
 def clear_collection():
     """Wipe all stored chunks — useful when re-ingesting a new PDF."""
     client = _get_client()
-    client.delete_collection(COLLECTION_NAME)
+    try:
+        client.delete_collection(COLLECTION_NAME)
+    except ValueError:
+        pass  # collection didn't exist yet, nothing to delete

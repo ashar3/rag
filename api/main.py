@@ -1,18 +1,14 @@
 """
-STEP 8 — FASTAPI BACKEND
-Analogy: The factory floor manager — connects all rooms and exposes
-two doors to the outside world:
-  POST /ingest  → upload PDF, run the full ingestion pipeline
-  POST /chat    → ask a question, get an answer
-
-Everything flows through here in the right order.
+FASTAPI BACKEND — The Factory Floor Manager
+Connects all rooms, exposes two main doors:
+  POST /ingest  → upload PDF → full ingestion pipeline
+  POST /chat    → ask question → 3-detective retrieval → LLM answer + detective report
 """
 
 import os
 import shutil
 from pathlib import Path
 
-import networkx as nx
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,6 +19,7 @@ from ingestion.chunker import chunk_text
 from ingestion.embedder import embed_texts
 from ingestion.vector_store import store_chunks, clear_collection
 from ingestion.graph_builder import build_graph
+from ingestion.bm25_index import build_bm25_index
 from retrieval.hybrid_retriever import retrieve
 from generation.prompt_builder import build_prompt
 from generation.llm_client import generate_answer
@@ -30,7 +27,7 @@ from memory.chat_history import ChatHistory
 
 load_dotenv()
 
-app = FastAPI(title="PDF RAG API", version="1.0.0")
+app = FastAPI(title="PDF RAG API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,11 +36,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- In-memory state (single user, single PDF session) ---
-# In production: store per session_id in Redis/DB
+# In-memory session state (single user). Production: Redis per session_id.
 _state: dict = {
-    "chunks": [],        # all chunks from the ingested PDF
-    "graph": None,       # NetworkX DiGraph
+    "chunks": [],
+    "graph": None,
+    "bm25_index": None,   # NEW: BM25 index built at ingest time
     "history": ChatHistory(),
     "pdf_name": None,
 }
@@ -52,43 +49,32 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── INGESTION ENDPOINT ─────────────────────────────────────────────────────────
+# ── INGESTION ──────────────────────────────────────────────────────────────────
 
 @app.post("/ingest")
 async def ingest_pdf(file: UploadFile = File(...)):
-    """
-    Upload a PDF → parse → chunk → embed → store in ChromaDB → build graph.
-    This is the full ingestion pipeline triggered by one API call.
-    """
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # Save uploaded file to disk
     save_path = UPLOAD_DIR / file.filename
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Step 1: Parse PDF → raw text
-    parsed = parse_pdf(str(save_path))
-
-    # Step 2: Chunk the text
-    chunks = chunk_text(parsed["full_text"], source=parsed["source"])
-
-    # Step 3: Embed all chunks
-    texts = [c["text"] for c in chunks]
+    parsed   = parse_pdf(str(save_path))
+    chunks   = chunk_text(parsed["full_text"], source=parsed["source"])
+    texts    = [c["text"] for c in chunks]
     embeddings = embed_texts(texts)
 
-    # Step 4: Clear old data and store new chunks in ChromaDB
     clear_collection()
     store_chunks(chunks, embeddings)
 
-    # Step 5: Build knowledge graph from chunks
-    graph = build_graph(chunks)
+    graph       = build_graph(chunks)
+    bm25_index  = build_bm25_index(chunks)   # NEW: build BM25 index
 
-    # Store in session state
-    _state["chunks"] = chunks
-    _state["graph"] = graph
-    _state["pdf_name"] = parsed["source"]
+    _state["chunks"]     = chunks
+    _state["graph"]      = graph
+    _state["bm25_index"] = bm25_index
+    _state["pdf_name"]   = parsed["source"]
     _state["history"].clear()
 
     return {
@@ -101,7 +87,7 @@ async def ingest_pdf(file: UploadFile = File(...)):
     }
 
 
-# ── CHAT ENDPOINT ──────────────────────────────────────────────────────────────
+# ── CHAT ───────────────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
     question: str
@@ -109,10 +95,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    """
-    Receive a question → retrieve relevant chunks (hybrid) → generate answer.
-    Chat history is maintained automatically between calls.
-    """
     if not _state["chunks"]:
         raise HTTPException(status_code=400, detail="No PDF ingested yet. Call /ingest first.")
 
@@ -120,37 +102,52 @@ async def chat(request: ChatRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # Step 6: Hybrid retrieval (vector + graph)
-    retrieved = retrieve(
+    # 3-detective retrieval — returns merged result + each detective's raw findings
+    retrieval_result = retrieve(
         query=question,
         graph=_state["graph"],
         all_chunks=_state["chunks"],
+        bm25_index=_state["bm25_index"],
     )
 
-    # Step 7: Build prompt with context + history
+    merged_chunks = retrieval_result["merged"]
+
     messages = build_prompt(
         query=question,
-        retrieved_chunks=retrieved,
+        retrieved_chunks=merged_chunks,
         chat_history=_state["history"].get(),
     )
 
-    # Step 8: Generate answer
     answer = generate_answer(messages)
 
-    # Step 9: Save to history for follow-up questions
     _state["history"].add("user", question)
     _state["history"].add("assistant", answer)
 
+    def format_hits(hits: list[dict]) -> list[dict]:
+        return [
+            {
+                "text": h["text"][:150] + ("..." if len(h["text"]) > 150 else ""),
+                "source": h.get("retrieval_source", "?"),
+                "score": h.get("bm25_score") or h.get("distance") or h.get("rrf_score"),
+            }
+            for h in hits
+        ]
+
     return {
         "answer": answer,
-        "sources": [
-            {"text": c["text"][:120] + "...", "source": c.get("retrieval_source", "?")}
-            for c in retrieved
-        ],
+        # final merged context used by LLM
+        "merged_sources": format_hits(merged_chunks),
+        # each detective's individual findings — for the learning commentary UI
+        "detective_report": {
+            "vector":  format_hits(retrieval_result["detective_a_vector"]),
+            "bm25":    format_hits(retrieval_result["detective_b_bm25"]),
+            "graph":   format_hits(retrieval_result["detective_c_graph"]),
+            "query_entities": retrieval_result["query_entities"],
+        },
     }
 
 
-# ── UTILITY ENDPOINTS ──────────────────────────────────────────────────────────
+# ── UTILITIES ──────────────────────────────────────────────────────────────────
 
 @app.get("/status")
 def status():
@@ -165,8 +162,9 @@ def status():
 @app.delete("/reset")
 def reset():
     clear_collection()
-    _state["chunks"] = []
-    _state["graph"] = None
+    _state["chunks"]     = []
+    _state["graph"]      = None
+    _state["bm25_index"] = None
     _state["history"].clear()
-    _state["pdf_name"] = None
+    _state["pdf_name"]   = None
     return {"status": "reset"}
