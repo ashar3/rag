@@ -8,7 +8,6 @@ nearest folders. That's semantic search — no keyword matching needed.
 import os
 import uuid
 import chromadb
-from chromadb.config import Settings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,12 +16,24 @@ _chroma_client = None
 COLLECTION_NAME = "resume_chunks"
 
 
-def _get_client() -> chromadb.PersistentClient:
+def _get_client():
     global _chroma_client
     if _chroma_client is None:
-        persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-        _chroma_client = chromadb.PersistentClient(path=persist_dir)
+        # CHROMA_MODE=memory → ephemeral (Streamlit Cloud, no disk)
+        # CHROMA_MODE=persist (default) → saves to disk (local dev)
+        mode = os.getenv("CHROMA_MODE", "persist")
+        if mode == "memory":
+            _chroma_client = chromadb.EphemeralClient()
+        else:
+            persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+            _chroma_client = chromadb.PersistentClient(path=persist_dir)
     return _chroma_client
+
+
+def reset_client():
+    """Force a new client on next call — needed when switching between sessions."""
+    global _chroma_client
+    _chroma_client = None
 
 
 def _get_collection():
