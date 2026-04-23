@@ -7,23 +7,33 @@ nearest folders. That's semantic search — no keyword matching needed.
 
 import os
 import uuid
+import shutil
+import tempfile
 import chromadb
 from dotenv import load_dotenv
 
 load_dotenv()
 
 _chroma_client = None
+_temp_dir = None                    # tracks the temp dir for memory-mode clients
 COLLECTION_NAME = "resume_chunks"
 
 
 def _get_client():
-    global _chroma_client
+    """
+    Returns a ChromaDB client.
+
+    CHROMA_MODE=memory → PersistentClient on a fresh temp directory per session.
+      (We use PersistentClient + tmpdir instead of EphemeralClient because the
+       latter has a known tenant-initialization bug in chromadb 0.6.3.)
+    CHROMA_MODE=persist (default) → normal disk-backed client at CHROMA_PERSIST_DIR.
+    """
+    global _chroma_client, _temp_dir
     if _chroma_client is None:
-        # CHROMA_MODE=memory → ephemeral (Streamlit Cloud, no disk)
-        # CHROMA_MODE=persist (default) → saves to disk (local dev)
         mode = os.getenv("CHROMA_MODE", "persist")
         if mode == "memory":
-            _chroma_client = chromadb.EphemeralClient()
+            _temp_dir = tempfile.mkdtemp(prefix="chroma_session_")
+            _chroma_client = chromadb.PersistentClient(path=_temp_dir)
         else:
             persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
             _chroma_client = chromadb.PersistentClient(path=persist_dir)
@@ -31,9 +41,16 @@ def _get_client():
 
 
 def reset_client():
-    """Force a new client on next call — needed when switching between sessions."""
-    global _chroma_client
+    """Force a new client on next call — needed when switching between sessions.
+    Also cleans up the memory-mode temp directory if one was created."""
+    global _chroma_client, _temp_dir
     _chroma_client = None
+    if _temp_dir and os.path.exists(_temp_dir):
+        try:
+            shutil.rmtree(_temp_dir)
+        except Exception:
+            pass
+    _temp_dir = None
 
 
 def _get_collection():
