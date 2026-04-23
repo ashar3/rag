@@ -5,7 +5,7 @@ small index cards (chunks). Each card overlaps the next slightly so we
 never lose a sentence that sits on a boundary between two cards.
 """
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 def chunk_text(full_text: str, source: str, chunk_size: int = 500, chunk_overlap: int = 100) -> list[dict]:

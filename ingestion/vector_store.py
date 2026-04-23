@@ -94,9 +94,11 @@ def query_similar(query_embedding: list[float], top_k: int = 5) -> list[dict]:
 
 
 def clear_collection():
-    """Wipe all stored chunks — useful when re-ingesting a new PDF."""
+    """Wipe all stored chunks — useful when re-ingesting a new PDF.
+    Safe to call even when the collection or tenant doesn't exist yet
+    (e.g. right after reset_client() on an EphemeralClient)."""
     client = _get_client()
     try:
         client.delete_collection(COLLECTION_NAME)
-    except ValueError:
-        pass  # collection didn't exist yet, nothing to delete
+    except Exception:
+        pass  # collection/tenant didn't exist — nothing to clean up
