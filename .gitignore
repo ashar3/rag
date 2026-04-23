@@ -9,3 +9,4 @@ chroma_db/
 .venv/
 venv/
 .streamlit/secrets.toml
+lib/
