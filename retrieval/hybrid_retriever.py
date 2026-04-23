@@ -110,19 +110,75 @@ def retrieve(
     # ── Detective C: Graph Traversal ──────────────────────────────────────────
     # Finds entities in query that exist in the graph, walks outward 2 hops
     query_entities = identify_query_entities(query, graph)
-    graph_hits = get_related_chunks(graph, query_entities, all_chunks, hops=2)
+    hops = 2
+    # walk the graph manually to collect visited nodes for commentary
+    visited_nodes: set[str] = set()
+    frontier = list(query_entities)
+    for _ in range(hops):
+        next_frontier: list[str] = []
+        for node in frontier:
+            if node in visited_nodes or not graph.has_node(node):
+                continue
+            visited_nodes.add(node)
+            next_frontier.extend(list(graph.successors(node)) + list(graph.predecessors(node)))
+        frontier = next_frontier
+
+    graph_hits = get_related_chunks(graph, query_entities, all_chunks, hops=hops)
     for h in graph_hits:
         h["retrieval_source"] = "graph"
 
     # ── RRF Fusion ────────────────────────────────────────────────────────────
-    # Only fuse lists that actually found something
     active_lists = [lst for lst in [vector_hits, bm25_hits, graph_hits] if lst]
     merged = reciprocal_rank_fusion(active_lists)
 
+    # ── Real-time parameters for the learning commentary ──────────────────────
+    query_tokens = query.lower().split()
+    bm25_token_idfs = {tok: round(float(bm25_index.idf.get(tok, 0.0)), 4) for tok in query_tokens}
+
+    avg_doc_len = (
+        sum(bm25_index.doc_len) / len(bm25_index.doc_len)
+        if hasattr(bm25_index, "doc_len") and bm25_index.doc_len else 0
+    )
+
     return {
-        "merged": merged,                    # final ranked context for LLM
-        "detective_a_vector": vector_hits,   # raw Vector results
-        "detective_b_bm25": bm25_hits,       # raw BM25 results
-        "detective_c_graph": graph_hits,     # raw Graph results
-        "query_entities": query_entities,    # what the graph matched on
+        "merged": merged,
+        "detective_a_vector": vector_hits,
+        "detective_b_bm25": bm25_hits,
+        "detective_c_graph": graph_hits,
+        "query_entities": query_entities,
+
+        # real-time parameters for the step-by-step walkthrough
+        "params": {
+            # Vector
+            "embedding_model":  "text-embedding-3-small",
+            "embedding_dim":    len(query_embedding),
+            "embedding_preview": [round(float(x), 4) for x in query_embedding[:8]],
+            "vector_distance_metric": "cosine",
+
+            # BM25
+            "query_tokens":     query_tokens,
+            "bm25_k1":          round(bm25_index.k1, 2),
+            "bm25_b":           round(bm25_index.b, 2),
+            "bm25_avg_doc_len": round(avg_doc_len, 1),
+            "bm25_token_idfs":  bm25_token_idfs,
+            "bm25_corpus_size": len(all_chunks),
+
+            # Graph
+            "graph_total_nodes": graph.number_of_nodes(),
+            "graph_total_edges": graph.number_of_edges(),
+            "graph_hops":        hops,
+            "graph_nodes_visited": sorted(visited_nodes),
+            "graph_visit_count": len(visited_nodes),
+
+            # RRF
+            "rrf_k": 60,
+            "rrf_top_results": [
+                {
+                    "preview": m["text"][:80],
+                    "score":   round(m.get("rrf_score", 0.0), 6),
+                    "sources": m.get("retrieval_source", ""),
+                }
+                for m in merged[:5]
+            ],
+        },
     }

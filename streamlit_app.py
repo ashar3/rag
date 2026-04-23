@@ -110,6 +110,7 @@ def show_detective_report(detective_report: dict):
     graph_hits   = detective_report.get("graph", [])
     entities     = detective_report.get("query_entities", [])
     query_tokens = detective_report.get("query_tokens", [])
+    params       = detective_report.get("params", {})
 
     with st.expander("🧠 How did the system find this answer? (Step-by-step walkthrough)", expanded=False):
 
@@ -157,6 +158,18 @@ chunk    → [0.11, -0.43, 0.85, ...]   very close = very relevant
 chunk    → [0.91,  0.22, -0.34, ...]  far away   = not relevant
 ```
 """)
+
+        # ── Live parameters for Vector ──
+        with st.container(border=True):
+            st.markdown("📊 **Live parameters for this query**")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Embedding model",  params.get("embedding_model", "?"))
+            c2.metric("Vector dimension", f"{params.get('embedding_dim', '?')}")
+            c3.metric("Distance metric",  params.get("vector_distance_metric", "?"))
+            st.markdown("**Your question, converted to a vector (first 8 of 1536 dimensions):**")
+            st.code(str(params.get("embedding_preview", [])), language="python")
+            st.caption("These 1536 numbers are your question's 'location' in meaning-space. ChromaDB finds chunks whose own 1536 numbers sit closest (by cosine distance).")
+
         if vector_hits:
             st.success(f"✅ Found {len(vector_hits)} semantically similar chunks")
             for i, h in enumerate(vector_hits):
@@ -192,6 +205,32 @@ If your resume says "AWS" and you ask "AWS", Vector might miss it
 because "AWS" is a rare acronym with weak embedding signal.
 BM25 locks onto exact characters instantly.
 """)
+
+        # ── Live parameters for BM25 ──
+        with st.container(border=True):
+            st.markdown("📊 **Live parameters for this query**")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("k1 (saturation)",  params.get("bm25_k1", "?"))
+            c2.metric("b (length norm)",  params.get("bm25_b", "?"))
+            c3.metric("Avg chunk length", f"{params.get('bm25_avg_doc_len', '?')} tokens")
+            c4.metric("Corpus size",       f"{params.get('bm25_corpus_size', '?')} chunks")
+
+            idfs = params.get("bm25_token_idfs", {})
+            if idfs:
+                st.markdown("**IDF score per token from your question** *(higher = rarer = more valuable)*")
+                sorted_idfs = sorted(idfs.items(), key=lambda x: x[1], reverse=True)
+                for tok, score in sorted_idfs:
+                    if score > 1.5:
+                        tag = "🟢 rare · valuable"
+                    elif score > 0.5:
+                        tag = "🟡 moderate"
+                    elif score > 0:
+                        tag = "🔴 common · low signal"
+                    else:
+                        tag = "⚪ not in corpus"
+                    st.markdown(f"- `{tok}` → **IDF = {score}** · {tag}")
+            st.caption("IDF = log((N − n + 0.5) / (n + 0.5) + 1) where N = total chunks, n = chunks containing this token. Common words appear in many chunks, so their IDF approaches 0.")
+
         if bm25_hits:
             st.success(f"✅ Found {len(bm25_hits)} keyword-matching chunks")
             for i, h in enumerate(bm25_hits):
@@ -228,6 +267,23 @@ You ask "what did he build?" — the graph knows:
 `build → Project Y → Company X → other context about Company X`
 ...even if those chunks share zero words with "build".
 """)
+
+        # ── Live parameters for Graph ──
+        with st.container(border=True):
+            st.markdown("📊 **Live parameters for this query**")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total nodes",       params.get("graph_total_nodes", "?"))
+            c2.metric("Total edges",       params.get("graph_total_edges", "?"))
+            c3.metric("Traversal hops",    params.get("graph_hops", "?"))
+            c4.metric("Nodes visited",     params.get("graph_visit_count", "?"))
+
+            visited = params.get("graph_nodes_visited", [])
+            if visited:
+                st.markdown("**Nodes walked during traversal** *(seed entities + everything within 2 hops):*")
+                st.code(" · ".join(visited), language=None)
+            else:
+                st.caption("No graph traversal happened for this query — no entities from your question matched any graph nodes.")
+
         if entities:
             st.success(f"✅ Matched {len(entities)} entities from your question in the graph")
             st.markdown(f"**Entities found:** {' · '.join([f'`{e}`' for e in entities])}")
@@ -270,6 +326,27 @@ dominate rank-2. Without it, only rank-1 results from each detective would matte
 
 **Total unique chunks sent to LLM:** `{len(vector_hits) + len(bm25_hits) + len(graph_hits)}` raw → merged & re-ranked by RRF
 """)
+
+        # ── Live parameters for RRF ──
+        with st.container(border=True):
+            st.markdown("📊 **Live RRF scores for this query — top 5 merged results**")
+            st.metric("RRF smoothing constant (k)", params.get("rrf_k", 60))
+            top_rrf = params.get("rrf_top_results", [])
+            if top_rrf:
+                for i, r in enumerate(top_rrf):
+                    source_tag = r.get("sources", "?")
+                    score      = r.get("score", 0.0)
+                    preview    = r.get("preview", "")
+                    icon = ""
+                    if "vector" in source_tag: icon += "🔵"
+                    if "bm25"   in source_tag: icon += "🟡"
+                    if "graph"  in source_tag: icon += "🟢"
+                    st.markdown(f"**#{i+1}** {icon} · RRF score = `{score}` · found by: `{source_tag}`")
+                    st.caption(f"📝 {preview}...")
+                st.caption("Chunks found by MORE detectives get higher combined scores — that's how RRF rewards consensus.")
+            else:
+                st.info("No merged results (no detective returned anything).")
+
         st.divider()
 
         # ── STEP 5: LLM ──────────────────────────────────────────────────────
@@ -516,6 +593,7 @@ with tab_chat:
                         "bm25":           fmt(retrieval_result["detective_b_bm25"]),
                         "graph":          fmt(retrieval_result["detective_c_graph"]),
                         "query_entities": retrieval_result["query_entities"],
+                        "params":         retrieval_result.get("params", {}),
                     }
 
                     st.markdown(answer)
