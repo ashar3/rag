@@ -13,7 +13,14 @@ import os
 import tempfile
 import streamlit as st
 import streamlit.components.v1 as components
-from pyvis.network import Network
+
+# Optional — graph viz is a nice-to-have. App still works if pyvis fails to install.
+try:
+    from pyvis.network import Network
+    PYVIS_AVAILABLE = True
+except ImportError:
+    PYVIS_AVAILABLE = False
+    Network = None
 
 # Tell ChromaDB to run in-memory — no disk needed on Streamlit Cloud
 os.environ["CHROMA_MODE"] = "memory"
@@ -410,6 +417,16 @@ def render_graph(G):
     Edge color  = relationship type
     Edge label  = relationship name (USED_AT, WORKED_AT, etc.)
     """
+    if not PYVIS_AVAILABLE:
+        st.error("Graph visualisation is not available — `pyvis` package failed to install.")
+        st.info("Falling back to a simple node list (the retrieval system still uses the graph fine).")
+        if G and G.number_of_nodes() > 0:
+            st.write(f"**{G.number_of_nodes()} nodes, {G.number_of_edges()} edges**")
+            for src, dst, attrs in list(G.edges(data=True))[:50]:
+                rel = attrs.get("relation", "RELATED_TO")
+                st.markdown(f"- `{src}` **{rel}** → `{dst}`")
+        return
+
     if G is None or G.number_of_nodes() == 0:
         st.warning("No graph built yet — ingest a PDF first.")
         return
