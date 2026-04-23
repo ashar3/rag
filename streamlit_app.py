@@ -162,8 +162,9 @@ chunk    → [0.91,  0.22, -0.34, ...]  far away   = not relevant
             for i, h in enumerate(vector_hits):
                 dist = h.get("score")
                 relevance = "🟢 Very relevant" if dist and dist < 0.3 else "🟡 Somewhat relevant" if dist and dist < 0.6 else "🔴 Weak match"
-                with st.expander(f"Result {i+1} — distance={dist}  {relevance}"):
-                    st.markdown(f"**Distance from your question:** `{dist}`  *(0 = identical meaning, 1 = opposite meaning)*")
+                with st.container(border=True):
+                    st.markdown(f"**Result {i+1}** · distance=`{dist}` · {relevance}")
+                    st.caption("0 = identical meaning · 1 = opposite meaning")
                     st.text(h["text"])
         else:
             st.warning("No vector results — ChromaDB may be empty. Try re-ingesting the PDF.")
@@ -195,8 +196,9 @@ BM25 locks onto exact characters instantly.
             st.success(f"✅ Found {len(bm25_hits)} keyword-matching chunks")
             for i, h in enumerate(bm25_hits):
                 score = h.get("score")
-                with st.expander(f"Result {i+1} — BM25 score={score}"):
-                    st.markdown(f"**BM25 score:** `{score}`  *(higher = better keyword match weighted by rarity)*")
+                with st.container(border=True):
+                    st.markdown(f"**Result {i+1}** · BM25 score=`{score}`")
+                    st.caption("higher = better keyword match weighted by rarity")
                     st.text(h["text"])
         else:
             st.info("No BM25 results — none of your question's keywords appeared in any chunk.")
@@ -236,8 +238,9 @@ You ask "what did he build?" — the graph knows:
         if graph_hits:
             st.success(f"✅ Graph traversal returned {len(graph_hits)} connected chunks")
             for i, h in enumerate(graph_hits):
-                with st.expander(f"Result {i+1} — found via graph relationship"):
-                    st.markdown("*This chunk was reached by following edges from a matched entity, not by text similarity.*")
+                with st.container(border=True):
+                    st.markdown(f"**Result {i+1}** — found via graph relationship")
+                    st.caption("Reached by following edges from a matched entity, not by text similarity.")
                     st.text(h["text"])
         else:
             st.info("No graph chunks returned for this query.")
